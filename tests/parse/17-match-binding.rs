@@ -1,0 +1,1 @@
+fn f(o: Option<i32>) -> i32 { match o { Some(x) => x, None => 0 } }

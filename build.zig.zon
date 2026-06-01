@@ -1,0 +1,29 @@
+.{
+    .name = .mrust_zig,
+    .version = "0.1.0",
+    .fingerprint = 0x3705f43bef947f96,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .mrustc = .{
+            .url = "git+https://github.com/thepowersgang/mrustc#be69c7479a10bdce1b86cb886789d14a143ddf34",
+            .hash = "N-V-__8AAGCSdgCoFt9VE8qxo1a-VGvfLvHLrXlX8glZXRI6",
+        },
+        .zlib = .{
+            .url = "git+https://github.com/allyourcodebase/zlib?ref=1.3.2#d3b5519d3b73616a6bfece0712f080029d2a9244",
+            .hash = "zlib-1.3.2-ZZQ7lc8NAAAHm9MDfplvwoesXvk4tVm6VCsiI8KnIbT0",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "build.sh",
+        "LICENSE",
+        "README.md",
+        "CLAUDE.md",
+        "HANDOFF.md",
+        "docs",
+        "examples",
+        "tests",
+        "tools",
+    },
+}
