@@ -32,5 +32,7 @@ jobs:
       - name: Build Summary ${{ matrix.targets }}
         run: zig build --summary all -freference-trace -Dtarget=${{ matrix.targets }}
       - name: Smoke test
-        if: matrix.target == 'x86_64-linux-musl' && matrix.target == 'x86_64-linux-gnu'
-        run: zig build test --summary all
+        if: matrix.targets == 'x86_64-linux-musl' && matrix.target == 'x86_64-linux-gnu'
+        run: |
+            zig build demo --summary all
+            zig build test --summary all

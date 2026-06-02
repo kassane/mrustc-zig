@@ -15,6 +15,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     }).artifact("z");
+    zlib.root_module.sanitize_c = .off;
 
     const common = b.addLibrary(.{
         .name = "common",
@@ -61,18 +62,12 @@ pub fn build(b: *std.Build) void {
         break :blk exe;
     } else null;
 
-    const zigcc = b.addExecutable(.{
-        .name = "zig-cc",
-        .root_module = b.createModule(.{
-            .target = b.graph.host,
-            .optimize = optimize,
-            .link_libc = true,
-            .sanitize_c = .off,
-        }),
-    });
-    zigcc.root_module.addCSourceFile(.{ .file = b.path("tools/zig-cc.c"), .flags = &.{"-std=c99"} });
-    const zigcc_install = b.addInstallArtifact(zigcc, .{});
-    const zigcc_path = b.getInstallPath(.bin, "zig-cc");
+    const zigcc = buildZigCxxWrapper(
+        b,
+        optimize,
+        target.query.zigTriple(b.allocator) catch @panic("OOM"),
+    );
+    b.installArtifact(zigcc);
 
     const expect_fail = b.addExecutable(.{
         .name = "expect-fail",
@@ -159,7 +154,7 @@ pub fn build(b: *std.Build) void {
     // then a second Run executes the produced binary and checks its exit term.
     // docs/06-libcore.md.
     if (target.query.isNative()) {
-        const app = mrustcCompile(b, mrustc_exe, zigcc_path, &zigcc_install.step, b.path("examples/03-mini-core-runnable/mini_core.rs"), null);
+        const app = mrustcCompile(b, mrustc_exe, zigcc, b.path("examples/02-mini-core-runnable/mini_core.rs"), null);
         runExpect(b, test_step, app, 14);
     }
 
@@ -167,22 +162,17 @@ pub fn build(b: *std.Build) void {
     const demo_step = b.step("demo", "Build + run the mini-core examples (mrustc -> C -> zig cc)");
     if (target.query.isNative()) {
         // (a) self-contained mini libcore: 2 + 3*4 -> exit 14.
-        const a = mrustcCompile(b, mrustc_exe, zigcc_path, &zigcc_install.step, b.path("examples/03-mini-core-runnable/mini_core.rs"), null);
+        const a = mrustcCompile(b, mrustc_exe, zigcc, b.path("examples/02-mini-core-runnable/mini_core.rs"), null);
         runExpect(b, demo_step, a, 14);
-        // (b) Rust -> Zig FFI: ffi.rs calls a Zig kernel; zig_triple(14) -> 42.
-        // The Zig kernel is a real `b.addObject` (no shell); zig-cc appends it to
-        // mrustc's link via $ZIGCC_EXTRA (the kernel object's install path).
         const kernel = b.addObject(.{
             .name = "kernel",
             .root_module = b.createModule(.{
                 .target = b.graph.host,
                 .optimize = .ReleaseFast,
-                .root_source_file = b.path("examples/03-mini-core-runnable/kernel.zig"),
+                .root_source_file = b.path("examples/02-mini-core-runnable/kernel.zig"),
             }),
         });
-        const kernel_install = b.addInstallFile(kernel.getEmittedBin(), "kernel.o");
-        const kernel_path = b.getInstallPath(.prefix, "kernel.o");
-        const f = mrustcCompile(b, mrustc_exe, zigcc_path, &zigcc_install.step, b.path("examples/03-mini-core-runnable/ffi.rs"), .{ .extra_obj = kernel_path, .extra_install = &kernel_install.step });
+        const f = mrustcCompile(b, mrustc_exe, zigcc, b.path("examples/02-mini-core-runnable/ffi.rs"), .{ .extra_obj = kernel.getEmittedBin() });
         runExpect(b, demo_step, f, 42);
     }
 
@@ -206,13 +196,16 @@ pub fn build(b: *std.Build) void {
                 const src = rustc_src.?;
                 const lc_step = b.step("libcore", "Bootstrap libcore from -Drustc-src");
 
-                const mc_run = b.addRunArtifact(mc);
+                // Same zig-cc launcher indirection as mrustcCompile: minicargo
+                // reads $CC and $MRUSTC_PATH from the environment, which the maker
+                // resolves into KEY=VALUE argv pairs before the `--` separator.
+                const mc_run = b.addRunArtifact(zigcc);
+                mc_run.addArg("--mrustc-run");
                 mc_run.setEnvironmentVariable("MRUSTC_TARGET_VER", mrustc_target_ver);
-                mc_run.setEnvironmentVariable("ZIG", b.graph.zig_exe);
-                mc_run.setEnvironmentVariable("CC", zigcc_path);
-                mc_run.setEnvironmentVariable("MRUSTC_PATH", b.getInstallPath(.bin, "mrustc"));
-                mc_run.step.dependOn(&zigcc_install.step);
-                mc_run.step.dependOn(b.getInstallStep()); // installs mrustc -> MRUSTC_PATH
+                mc_run.addPrefixedArtifactArg("CC=", zigcc);
+                mc_run.addPrefixedArtifactArg("MRUSTC_PATH=", mrustc_exe);
+                mc_run.addArg("--");
+                mc_run.addArtifactArg(mc);
                 mc_run.addArg(b.pathJoin(&.{ src, "library/core" }));
                 mc_run.addArg("--script-overrides");
                 mc_run.addDirectoryArg(mrustc.path("script-overrides/stable-1.74.0-linux"));
@@ -236,12 +229,13 @@ pub fn build(b: *std.Build) void {
                 lc_step.dependOn(&lc_install.step);
 
                 // compile + run a no_std program against the freshly-built core.
-                const urc = b.addRunArtifact(mrustc_exe);
+                const urc = b.addRunArtifact(zigcc);
+                urc.addArg("--mrustc-run");
                 urc.setEnvironmentVariable("MRUSTC_TARGET_VER", mrustc_target_ver);
-                urc.setEnvironmentVariable("ZIG", b.graph.zig_exe);
-                urc.setEnvironmentVariable("CC", zigcc_path);
-                urc.step.dependOn(&zigcc_install.step);
-                urc.addFileArg(b.path("examples/03-mini-core-runnable/use_real_core.rs"));
+                urc.addPrefixedArtifactArg("CC=", zigcc);
+                urc.addArg("--");
+                urc.addArtifactArg(mrustc_exe);
+                urc.addFileArg(b.path("examples/02-mini-core-runnable/use_real_core.rs"));
                 urc.addArg("-L");
                 urc.addDirectoryArg(outdir);
                 urc.addArgs(&.{ "--crate-type", "bin", "-o" });
@@ -253,25 +247,54 @@ pub fn build(b: *std.Build) void {
     }
 }
 
+fn buildZigCxxWrapper(
+    b: *std.Build,
+    opt: std.builtin.OptimizeMode,
+    cross_triple: ?[]const u8,
+) *std.Build.Step.Compile {
+    const opts = b.addOptions();
+    opts.addOption([]const u8, "zig_exe", b.graph.zig_exe);
+    opts.addOption(?[]const u8, "triple", cross_triple);
+
+    const mod = b.createModule(.{
+        .target = b.graph.host,
+        .optimize = opt,
+        .root_source_file = b.path("tools/zigcc.zig"),
+    });
+    mod.addOptions("build_options", opts);
+    const exe = b.addExecutable(.{
+        .name = "zig-cc",
+        .root_module = mod,
+    });
+    return exe;
+}
+
 /// Compile a `.rs` to a native binary with mrustc, using the `zig-cc` launcher
 /// as `$CC`. Returns the produced binary as a LazyPath. Pure build-graph.
+///
+/// mrustc reads its C compiler from the `$CC` environment variable, but a Run
+/// step's environment must be plain strings while the launcher path is a
+/// build-output LazyPath (no getInstallPath/getPath in this toolchain). So we run
+/// zig-cc itself in its cross-platform "--mrustc-run" launcher mode: the maker
+/// resolves the artifact paths into `KEY=VALUE` argv pairs, and the launcher
+/// exports them (CC, ZIGCC_EXTRA) before exec'ing mrustc. mrustc then invokes the
+/// same zig-cc as `$CC` (without the sentinel) for the actual compile/link.
 fn mrustcCompile(
     b: *std.Build,
     mrustc_exe: *std.Build.Step.Compile,
-    zigcc_path: []const u8,
-    zigcc_install: *std.Build.Step,
+    zigcc: *std.Build.Step.Compile,
     src: std.Build.LazyPath,
-    opts: ?struct { extra_obj: []const u8, extra_install: *std.Build.Step },
+    opts: ?struct { extra_obj: std.Build.LazyPath },
 ) std.Build.LazyPath {
-    const cg = b.addRunArtifact(mrustc_exe);
+    const cg = b.addRunArtifact(zigcc);
+    cg.addArg("--mrustc-run");
     cg.setEnvironmentVariable("MRUSTC_TARGET_VER", mrustc_target_ver);
-    cg.setEnvironmentVariable("ZIG", b.graph.zig_exe); // backend for zig-cc
-    cg.setEnvironmentVariable("CC", zigcc_path);
-    cg.step.dependOn(zigcc_install);
+    cg.addPrefixedArtifactArg("CC=", zigcc); // zig-cc compiles mrustc's emitted C
     if (opts) |o| {
-        cg.setEnvironmentVariable("ZIGCC_EXTRA", o.extra_obj); // link a Zig object
-        cg.step.dependOn(o.extra_install);
+        cg.addPrefixedFileArg("ZIGCC_EXTRA=", o.extra_obj); // link a Zig object
     }
+    cg.addArg("--");
+    cg.addArtifactArg(mrustc_exe);
     cg.addFileArg(src);
     cg.addArg("-o");
     const app = cg.addOutputFileArg("app");
@@ -337,6 +360,12 @@ fn cxxModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .target = target,
         .optimize = optimize,
         .link_libcpp = true,
+        // mrustc relies on patterns UBSan flags as UB (e.g. binding a reference
+        // to a transiently-null GenericParams* in hir_typeck/static.cpp). These
+        // are benign upstream (gcc/clang without -fsanitize), but zig defaults
+        // sanitize_c to .full in Debug/ReleaseSafe and traps. Match the upstream
+        // Makefile and build the C++ sources without the C sanitizers.
+        .sanitize_c = .off,
     });
 }
 
